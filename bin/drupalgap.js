@@ -447,7 +447,13 @@ function drupalgap_alert(message) {
       if (options.title) { title = options.title; }
       if (options.buttonName) { buttonName = options.buttonName; }
     }
-    navigator.notification.alert(message, alertCallback, title, buttonName);
+    if (typeof navigator.notification === 'undefined') {
+      alert(message);
+      alertCallback();
+    }
+    else {
+      navigator.notification.alert(message, alertCallback, title, buttonName);
+    }
   }
   catch (error) { console.log('drupalgap_alert - ' + error); }
 }
@@ -458,12 +464,13 @@ function drupalgap_alert(message) {
  * execute while the confirmation is displayed to the user.
  * You may optionally pass in a second argument as a JSON object with the
  * following properties:
- *   confirmCallback - the function to call after the user presses a button. The
- *               button label is passed to the function.
- *   title - the title to use on the alert box, defaults to 'Alert'
+ *   confirmCallback - the function to call after the user presses a button, the
+ *               button's label is passed to this function.
+ *   title - the title to use on the alert box, defaults to 'Confirm'
  *   buttonLabels - the text to place on the OK, and Cancel buttons, separated
  *                  by comma.
  * @param {String} message
+ * @return {Boolean}
  */
 function drupalgap_confirm(message) {
   try {
@@ -479,12 +486,20 @@ function drupalgap_confirm(message) {
       if (options.title) { title = options.title; }
       if (options.buttonLabels) { buttonLabels = options.buttonLabels; }
     }
-    navigator.notification.confirm(
-        message,
-        confirmCallback,
-        title,
-        buttonLabels
-    );
+    // The phonegap confirm dialog doesn't seem to work in Ripple, so just use
+    // the default one. Otherwise just use the normal confirm.
+    if (typeof parent.window.ripple === 'function') {
+      if (confirm(message)) { confirmCallback(); }
+    }
+    else {
+      navigator.notification.confirm(
+          message,
+          confirmCallback,
+          title,
+          buttonLabels
+      );
+    }
+    return false;
   }
   catch (error) { console.log('drupalgap_confirm - ' + error); }
 }
@@ -1842,13 +1857,36 @@ function drupalgap_get_path(type, name) {
  */
 function drupalgap_back() {
   try {
-    if (drupalgap_path_get() != drupalgap.settings.front) {
-      drupalgap.back = true;
-      history.back();
-      drupalgap_path_set(drupalgap.back_path);
+    if ($('.ui-page-active').attr('id') == drupalgap.settings.front) {
+      drupalgap_confirm('Exit ' + drupalgap.settings.title + '?', {
+          confirmCallback: _drupalgap_back_exit
+      });
     }
+    else { _drupalgap_back(); }
   }
   catch (error) { console.log('drupalgap_back' + error); }
+}
+
+/**
+ * Change the page to the previous page.
+ */
+function _drupalgap_back() {
+  try {
+    drupalgap.back = true;
+    history.back();
+    drupalgap_path_set(drupalgap.back_path);
+  }
+  catch (error) { console.log('drupalgap_back' + error); }
+}
+
+/**
+ *
+ */
+function _drupalgap_back_exit() {
+  try {
+    navigator.app.exitApp();
+  }
+  catch (error) { console.log('_drupalgap_back_exit - ' + error); }
 }
 
 /**
@@ -2134,6 +2172,25 @@ function drupalgap_goto_prepare_path(path) {
 }
 
 /**
+ * Given a link JSON object, this will return its attribute class value, or null
+ * if it isn't set.
+ * @param {Object} link
+ * @return {String}
+ */
+function drupalgap_link_get_class(link) {
+  try {
+    var css_class = null;
+    if (
+      link.options && link.options.attributes &&
+      link.options.attributes['class'] &&
+      !empty(link.options.attributes['class'])
+    ) { css_class = link.options.attributes['class']; }
+    return css_class;
+  }
+  catch (error) { console.log('drupalgap_link_get_class - ' + error); }
+}
+
+/**
  * Given a router path, this will return the CSS class name that can be used for
  * the page container.
  * @param {String} router_path The page router path.
@@ -2359,11 +2416,15 @@ function drupalgap_render_page() {
  */
 function drupalgap_render_region(region) {
   try {
+    // @TODO - this function is getting huge. Break it up into many more
+    // manageable functions.
+
     // Make sure there are blocks specified for this theme in settings.js.
     if (!drupalgap.settings.blocks[drupalgap.settings.theme]) {
-      var msg = 'drupalgap_render_region - there are no blocks for the "' +
-        drupalgap.settings.theme + '" theme in the settings.js file!';
-      drupalgap_alert(msg);
+      var msg = 'WARNING: drupalgap_render_region() - there are no blocks ' +
+        'for the "' + drupalgap.settings.theme + '" theme in the settings.js ' +
+        'file!';
+      console.log(msg);
       return '';
     }
     // Grab the current path.
@@ -2372,6 +2433,7 @@ function drupalgap_render_region(region) {
     var region_html = '';
     // If the region has blocks specified for it in the theme in settings.js...
     if (drupalgap.settings.blocks[drupalgap.settings.theme][region.name]) {
+
       // If a class attribute hasn't yet been provided, set a default, then
       // append a system class name for the region onto its attributes array.
       if (!region.attributes['class']) { region.attributes['class'] = ''; }
@@ -2379,40 +2441,131 @@ function drupalgap_render_region(region) {
       // Open the region container.
       region_html += '<div ' + drupalgap_attributes(region.attributes) + '>';
       // If there are any links attached to this region, render them first.
+      var region_link_count = 0;
+      var region_link_popup_count = 0;
       if (region.links && region.links.length > 0) {
+        // Let's first iterate over all of the region links and keep counts of
+        // any links that use the ui-btn-left and ui-btn-right class attribute.
+        // This will allow us to properly wrap region links in a control group.
+        var ui_btn_left_count = 0;
+        var ui_btn_right_count = 0;
+        $.each(region.links, function(index, link) {
+            var data = menu_region_link_get_data(link);
+            if (!drupalgap_check_visibility('region', data)) { return; }
+            region_link_count++;
+            var css_class = drupalgap_link_get_class(link);
+            if (css_class) {
+              var side = menu_region_link_get_side(css_class);
+              if (side == 'left') { ui_btn_left_count++; }
+              else if (side == 'right') { ui_btn_right_count++; }
+            }
+        });
+
+        // We need to separately render each side of the header (left, right).
+        // That allows us to properly wrap the links with a control group if
+        // it is needed.
+        var region_link_html = '';
+        var ui_btn_left_html = '';
+        var ui_btn_right_html = '';
         for (var i = 0; i < region.links.length; i++) {
-          // Extract the data associated with this link. If it has a 'region'
-          // property then it is coming from a hook_menu, if it doesn't then it
-          // is coming from settings.js.
-          var data = null;
-          if (typeof region.links[i].region === 'undefined') {
-            data = region.links[i]; // link defined in settings.js
-            // TODO - we need to warn people that they can't make a custom menu
-            // with a machine name of 'regions' now that this machine name is a
-            // "system" name for rendering links in regions.
-          }
-          else {
-            data = region.links[i].region; // link defined via hook_menu()
-          }
+          // Grab the link and its data.
+          var region_link = region.links[i];
+          var data = menu_region_link_get_data(region_link);
           // Check link's region visiblity settings. Links will not be rendered
-          // on the system 'offline' or 'error' pages.
-          var render_link = false;
+          // on certain system pages.
+          // @TODO - this additional call to drupalgap_check_visibility() here
+          // may be expensive, consider setting aside the results from the call
+          // above, and using them here.
           if (drupalgap_check_visibility('region', data)) {
-            render_link = true;
-            if (current_path == 'offline' || current_path == 'error') {
-              render_link = false;
+
+            // Don't render the link on certain system pages.
+            if (in_array(current_path, ['offline', 'error', 'user/logout'])) {
+              continue;
             }
-            if (render_link) {
-              region_html += l(
-                region.links[i].title,
-                region.links[i].path,
-                data.options
-              );
+
+            // If this is a popup region link, set the jQM attributes to make
+            // this link function as a popup (dropdown) menu. Set the default
+            // link icon, if it isn't set.
+            var link_text = region_link.title;
+            var link_path = region_link.path;
+            if (data.options.popup) {
+              region_link_popup_count++;
+              // If the link text isn't set, and the data icon pos isn't set,
+              // set it the data icon pos so the button and icon are rendered
+              // properly.
+              if (
+                (!link_text || empty(link_text)) &&
+                typeof data.options.attributes['data-iconpos'] === 'undefined'
+              ) { data.options.attributes['data-iconpos'] = 'notext'; }
+              // If data-rel, data-icon, data-role aren't set, set them.
+              if (
+                typeof data.options.attributes['data-rel'] === 'undefined'
+              ) { data.options.attributes['data-rel'] = 'popup'; }
+              if (
+                typeof data.options.attributes['data-icon'] === 'undefined'
+              ) { data.options.attributes['data-icon'] = 'bars'; }
+              if (
+                typeof data.options.attributes['data-role'] === 'undefined'
+              ) { data.options.attributes['data-role'] = 'button'; }
+              // Popup menus need a dynamic href value on the link, so we
+              // always overwrite it.
+              link_path = null;
+              data.options.attributes['href'] =
+                '#' + menu_container_id(data.options.popup_delta);
             }
+            else {
+              // Set the data-role to a button, if one isn't already set.
+              if (typeof data.options.attributes['data-role'] === 'undefined') {
+                data.options.attributes['data-role'] = 'button';
+              }
+            }
+            // If it has notext for the icon position, force the text to be
+            // an nbsp.
+            if (data.options.attributes['data-iconpos'] == 'notext') {
+              link_text = '&nbsp;';
+            }
+
+            // Render the link on the proper side.
+            var css_class = drupalgap_link_get_class(region_link);
+            var side = menu_region_link_get_side(css_class);
+            var link_html = l(link_text, link_path, data.options);
+            if (side == 'left') { ui_btn_left_html += link_html; }
+            else if (side == 'right') { ui_btn_right_html += link_html; }
+
           }
         }
+
+        // If there was more than one link on a side, wrap it in a control
+        // group, and remove the ui-btn class from the links.
+        if (ui_btn_left_count > 1) {
+          var attrs = {
+            'data-type': 'horizontal',
+            'data-role': 'controlgroup',
+            'class': 'ui-btn-left'
+          };
+          ui_btn_left_html = '<div ' + drupalgap_attributes(attrs) + '>' +
+            ui_btn_left_html.replace(/ui-btn-left/g, '') +
+          '</div>';
+        }
+        if (ui_btn_right_count > 1) {
+          var attrs = {
+            'data-type': 'horizontal',
+            'data-role': 'controlgroup',
+            'class': 'ui-btn-right'
+          };
+          ui_btn_right_html = '<div ' + drupalgap_attributes(attrs) + '>' +
+            ui_btn_right_html.replace(/ui-btn-right/g, '') +
+          '</div>';
+        }
+
+        // Finally render the ui sides on the region.
+        region_html += ui_btn_left_html + ui_btn_right_html;
       }
-      // Render each block in the region.
+
+      // Render each block in the region. Determine how many visible blocks are
+      // in the region.
+      var block_count = 0;
+      var block_menu_count = 0;
       $.each(drupalgap.settings.blocks[drupalgap.settings.theme][region.name],
         function(block_delta, block_settings) {
           // Check the block's visibility settings.
@@ -2427,6 +2580,8 @@ function drupalgap_render_region(region) {
           }
           if (render_block) {
             var block = drupalgap_block_load(block_delta);
+            block_count++;
+            if (menu_load(block_delta)) { block_menu_count++; }
             if (block) {
               region_html += module_invoke(
                 block.module,
@@ -2437,6 +2592,21 @@ function drupalgap_render_region(region) {
             }
           }
       });
+      // If this was a header or footer, and there were only region links
+      // rendered, place an empty header in the region.
+      if (
+        in_array(region.attributes['data-role'], ['header', 'footer']) &&
+        (
+          block_count == 0 && region_link_count > 0 ||
+          block_count - block_menu_count == 0
+        ) ||
+        (
+          region_link_count > 0 &&
+          region_link_popup_count >= block_menu_count &&
+          block_count == 0
+        )
+      ) { region_html += '<h2>&nbsp;</h2>'; }
+
       // Close the region container.
       region_html += '</div><!-- ' + region.name + ' -->';
     }
@@ -2661,10 +2831,15 @@ function drupalgap_form_clear(form_selector) {
 function drupalgap_form_defaults(form_id) {
   try {
     var form = {};
-    // Set the form id, elements and buttons.
+    // Set the form id, elements, buttons, options and attributes.
     form.id = form_id;
     form.elements = {};
     form.buttons = {};
+    form.options = {
+      attributes: {
+        'class': ''
+      }
+    };
     // Create a prefix and suffix.
     form.prefix = '';
     form.suffix = '';
@@ -2779,7 +2954,7 @@ function drupalgap_form_get_element_container_class(name) {
  */
 function drupalgap_form_render(form) {
   try {
-    // @todo - we may possibly colliding html element ids!!! For example, I
+    // @TODO - we may possibly colliding html element ids!!! For example, I
     // think the node edit page gets an id of "node_edit" and possibly so does
     // the node edit form, which also may get an id of "node_edit". We may want
     // to prefix both the template page and form ids with prefixes, e.g.
@@ -2804,12 +2979,14 @@ function drupalgap_form_render(form) {
     }
     // Render the form's input elements.
     var form_elements = _drupalgap_form_render_elements(form);
+    var form_attributes = drupalgap_attributes(form.options.attributes);
     // Return the form html.
-    var form_html =
-    '<form id="' + form.id + '">' + prefix + '<div>' +
+    var form_html = '<form id="' + form.id + '" ' + form_attributes + '>' +
+      prefix +
       '<div id="drupalgap_form_errors"></div>' +
       form_elements +
-    '</div>' + suffix + '</form>';
+      suffix +
+    '</form>';
     return form_html;
   }
   catch (error) { console.log('drupalgap_form_render - ' + error); }
@@ -2884,6 +3061,14 @@ function drupalgap_form_state_values_assemble(form) {
  */
 function _drupalgap_form_state_values_assemble_get_element_value(id, element) {
   try {
+    // If a value_callback is specified on the element, call that function to
+    // retrieve the element's value. Ohterwise, we'll use the default techniques
+    // implemented to extract a value for the form state.
+    if (element.value_callback && function_exists(element.value_callback)) {
+      var fn = window[element.value_callback];
+      return fn(id, element);
+    }
+    // Figure out the value, depending on the element type.
     var value = null;
     var selector = '';
     if (element.type == 'radios') {
@@ -2895,6 +3080,18 @@ function _drupalgap_form_state_values_assemble_get_element_value(id, element) {
         var _checkbox = $(selector);
         if ($(_checkbox).is(':checked')) { value = 1; }
         else { value = 0; }
+        break;
+      case 'checkboxes':
+        // Iterate over each option, and see if it is checked, then pop it onto
+        // the value array.
+        value = {};
+        $.each(element.options, function(_value, _label) {
+            if (_value == 'attributes') { return; } // Skip attributes.
+            if (empty(_label)) { _label = _value; }
+            selector = 'input[name="' + element.name + '[' + _value + ']"]';
+            if (!$(selector).is(':checked')) { value[_value] = 0; }
+            else { value[_value] = _value; }
+        });
         break;
       case 'list_boolean':
         var _checkbox = $(selector);
@@ -3181,9 +3378,7 @@ function _drupalgap_form_render_elements(form) {
               if (
                 form.entity_type == 'comment' &&
                 form.bundle.indexOf('comment_node_') != -1
-              ) {
-                bundle = form.bundle.replace('comment_node_', '');
-              }
+              ) { bundle = form.bundle.replace('comment_node_', ''); }
             }
             // This is not a field, if it has a weight in
             // field_info_extra_fields use it, otherwise just append it to the
@@ -3313,10 +3508,28 @@ function _drupalgap_form_render_element(form, element) {
         // This is used by field widget forms to extend form elements.
         if (!items[delta].children) { items[delta].children = []; }
 
-        // Generate the label for field items on delta zero only.
+        // Generate the label for field items on delta zero only. Keep in mind
+        // rendered labels, with an element title_placeholder set to true,
+        // will not be appended to the result html later.
         if (element.is_field && delta == 0) {
           item.title = element.title;
           item_label = theme('form_element_label', {'element': item});
+        }
+
+        // If the element's title is set to be a placeholder, set the
+        // placeholder attribute equal to the title on the current item, unless
+        // someone already set it. If it is a required element, mark it as such.
+        if (
+          delta == 0 && typeof element.title_placeholder !== 'undefined' &&
+          element.title_placeholder &&
+          typeof variables.attributes['placeholder'] === 'undefined'
+        ) {
+          var placeholder = element.title;
+          // @TODO show a better required marker for placeholders.
+          /*if (element.required) {
+            placeholder += ' ' + theme('form_required_marker', { });
+          }*/
+          variables.attributes['placeholder'] = placeholder;
         }
 
         // If there wasn't a default value provided, set one. Then set the
@@ -3383,21 +3596,42 @@ function _drupalgap_form_render_element(form, element) {
       html += theme('button', add_another_item_variables);
     }*/
 
+    // Is this element wrapped? We won't wrap hidden inputs by default, unless
+    // someone is overriding it.
+    var wrapped = true;
+    if (typeof element.wrapped !== 'undefined' && !element.wrapped) {
+      wrapped = false;
+    }
+    if (element.type == 'hidden') {
+      wrapped = false;
+      if (element.wrapped) { wrapped = true; }
+    }
+
+    // If there is an element prefix, place it in the html.
+    if (element.prefix) { html += element.prefix; }
+
     // Open the element container.
     var container_attributes = {
       'class': drupalgap_form_get_element_container_class(name)
     };
-    if (element.type != 'hidden') {
+    if (wrapped) {
       html += '<div ' + drupalgap_attributes(container_attributes) + '>';
     }
 
     // Add a label to the element, except submit and hidden elements. Any field
     // labels have already been rendered, other element labels must be manually
-    // rendered here.
+    // rendered here. Don't attach the label if the element's title_placeholder
+    // is set to true.
     if (element.type != 'submit' && element.type != 'hidden') {
-      if (element.is_field) { html += item_label; }
+      if (
+        typeof element.title_placeholder !== 'undefined' &&
+        element.title_placeholder
+      ) { /* Skip label for placeholders. */ }
       else {
-        html += theme('form_element_label', {'element': element});
+        if (element.is_field) { html += item_label; }
+        else {
+          html += theme('form_element_label', {'element': element});
+        }
       }
     }
 
@@ -3410,7 +3644,10 @@ function _drupalgap_form_render_element(form, element) {
     }
 
     // Close the element container.
-    if (element.type != 'hidden') { html += '</div>'; }
+    if (wrapped) { html += '</div>'; }
+
+    // If there is an element suffix, place it in the html.
+    if (element.suffix) { html += element.suffix; }
 
     // Return the element html.
     return html;
@@ -3513,7 +3750,9 @@ function _drupalgap_form_render_element_item(form, element, variables, item) {
             });
           }
           // Render the child with the theme system.
+          if (item.children[i].prefix) { html += item.children[i].prefix; }
           html += theme(theme_type, item.children[i]);
+          if (item.children[i].suffix) { html += item.children[i].suffix; }
         }
         else {
           console.log(
@@ -3745,11 +3984,16 @@ function _drupalgap_form_validate(form, form_state) {
           else { value = form_state.values[name]; }
           // Check for empty values.
           if (empty(value)) { valid = false; }
-          // Check for a -1 value on a select list.
-          else if (element.type == 'select' && value == -1) {
-            // @todo - this approach to select list validation will not allow
-            // a developer to have a select list option with a -1 value.
-            valid = false;
+          // Validate a required select list.
+          else if (
+            element.type == 'select' && element.required && value == ''
+          ) { valid = false; }
+          else if (element.type == 'checkboxes' && element.required) {
+            var has_value = false;
+            $.each(form_state.values[name], function(key, value) {
+                if (value) { has_value = true; return false; }
+            });
+            if (!has_value) { valid = false; }
           }
           if (!valid) {
             var field_title = name;
@@ -3784,6 +4028,35 @@ function theme_checkbox(variables) {
 }
 
 /**
+ * Themes checkboxes input.
+ * @param {Object} variables
+ * @return {String}
+ */
+function theme_checkboxes(variables) {
+  try {
+    var html = '';
+    variables.attributes.type = 'checkboxes';
+    $.each(variables.options, function(value, label) {
+        if (value == 'attributes') { return; } // Skip attributes.
+        var _label = value;
+        if (!empty(label)) { _label = label; }
+        html += '<label>' + theme('checkbox', {
+            value: value,
+            attributes: {
+              name: variables.name + '[' + value + ']'
+            }
+        }) + '&nbsp;' + label + '</label>';
+    });
+    // Check the box?
+    /*if (variables.checked) {
+      variables.attributes.checked = 'checked';
+    }*/
+    return html;
+  }
+  catch (error) { console.log('theme_checkbox - ' + error); }
+}
+
+/**
  * Themes a email input.
  * @param {Object} variables
  * @return {String}
@@ -3805,6 +4078,7 @@ function theme_email(variables) {
 function theme_form_element_label(variables) {
   try {
     var element = variables.element;
+    // Any elements with a title_placeholder set to true
     // By default, use the element id as the label for, unless the element is
     // a radio, then use the name.
     var label_for = '';
@@ -3816,11 +4090,23 @@ function theme_form_element_label(variables) {
     // Render the label.
     var html =
       '<label for="' + label_for + '"><strong>' + element.title + '</strong>';
-    if (element.required) { html += '*'; }
+    if (element.required) { html += theme('form_required_marker', { }); }
     html += '</label>';
     return html;
   }
   catch (error) { console.log('theme_form_element_label - ' + error); }
+}
+
+/**
+ * Themes a marker for a required form element label.
+ * @param {Object} variables
+ * @return {String}
+ */
+function theme_form_required_marker(variables) {
+  try {
+    return '*';
+  }
+  catch (error) { console.log('theme_form_required_marker - ' + error); }
 }
 
 /**
@@ -3908,6 +4194,20 @@ function theme_radios(variables) {
     return radios;
   }
   catch (error) { console.log('theme_radios - ' + error); }
+}
+
+/**
+ * Themes a search input.
+ * @param {Object} variables
+ * @return {String}
+ */
+function theme_search(variables) {
+  try {
+    variables.attributes.type = 'search';
+    var output = '<input ' + drupalgap_attributes(variables.attributes) + ' />';
+    return output;
+  }
+  catch (error) { console.log('theme_search - ' + error); }
 }
 
 /**
@@ -4935,10 +5235,6 @@ function theme_image(variables) {
     if (variables.path) { variables.attributes.src = variables.path; }
     if (variables.alt) { variables.attributes.alt = variables.alt; }
     if (variables.title) { variables.attributes.title = variables.title; }
-    // Make sure the image width doesn't exceed the device's width.
-    if (!variables.attributes.style) { variables.attributes.style = ''; }
-    variables.attributes.style +=
-      ' max-width: ' + drupalgap_max_width() + 'px; ';
     // Render the image.
     return '<img ' + drupalgap_attributes(variables.attributes) + ' />';
   }
@@ -5279,6 +5575,44 @@ function comment_access(comment) {
 }
 
 /**
+ * Given a node id, this will return the id to use on the comments wrapper.
+ * @param {Number} nid
+ * @return {String}
+ */
+function comments_container_id(nid) {
+  try {
+    return 'comments_container_' + nid;
+  }
+  catch (error) { console.log('comments_container_id - ' + error); }
+}
+
+/**
+ * Given a comment id, this will return the id to use on the comment wrapper.
+ * @param {Number} cid
+ * @return {String}
+ */
+function comment_container_id(cid) {
+  try {
+    return 'comment_container_' + cid;
+  }
+  catch (error) { console.log('comment_container_id - ' + error); }
+}
+
+/**
+ * Given a node id, this will return the id to use on the html list for the
+ * comments.
+ * @param {Number} nid
+ * @return {String}
+ * @deprecated Use comments_container_id() instead.
+ */
+function comment_list_id(nid) {
+  try {
+    return comments_container_id(nid);
+  }
+  catch (error) { console.log('comment_list_id - ' + error); }
+}
+
+/**
  * Page callback for comment/%.
  * @param {Number} cid
  * @return {Object}
@@ -5420,19 +5754,6 @@ function comment_edit_submit(form, form_state) {
 }
 
 /**
- * Given a node id, this will return the id to use on the html list for the
- * comments.
- * @param {Number} nid
- * @return {String}
- */
-function comment_list_id(nid) {
-  try {
-    return 'comment_listing_items_' + nid;
-  }
-  catch (error) { console.log('comment_list_id - ' + error); }
-}
-
-/**
  * Implements hook_services_postprocess().
  * @param {Object} options
  * @param {Object} result
@@ -5451,13 +5772,11 @@ function comment_services_postprocess(options, result) {
             success: function(node) {
               comment_load(result.cid, {
                   success: function(comment) {
-                    var list_id = comment_list_id(node.nid);
-                    $('#' + list_id).append(
-                      '<li>' + theme('comment', {
-                          comment: comment
-                      }) + '</li>'
-                    ).listview('refresh');
-                    scrollToElement('#' + list_id + ' li:last-child', 500);
+                    var container_id = comments_container_id(node.nid);
+                    $('#' + container_id).append(
+                      theme('comment', { comment: comment })
+                    ).trigger('create');
+                    scrollToElement('#' + container_id + ' :last-child', 500);
                     var form_selector = '#' + drupalgap_get_page_id() +
                       ' #comment_edit';
                     drupalgap_form_clear(form_selector);
@@ -5472,6 +5791,30 @@ function comment_services_postprocess(options, result) {
 }
 
 /**
+ * Theme's a comment container.
+ * @param {Object} variables
+ * @return {String}
+ */
+function theme_comments(variables) {
+  try {
+    // Set the container id and append default attributes.
+    variables.attributes.id = comments_container_id(variables.node.nid);
+    variables.attributes['class'] += 'comments ';
+    variables.attributes['data-role'] = 'collapsible-set';
+    // Open the container.
+    var html = '<div ' + drupalgap_attributes(variables.attributes) + '>';
+    // Show a comments title if there are any comments.
+    if (variables.node.comment_count > 0) { html += '<h2>Comments</h2>'; }
+    // If the comments are already rendered, show them.
+    if (variables.comments) { html += variables.comments; }
+    // Close the container and return the html.
+    html += '</div>';
+    return html;
+  }
+  catch (error) { console.log('theme_comments - ' + error); }
+}
+
+/**
  * Theme's a comment.
  * @param {Object} variables
  * @return {String}
@@ -5479,34 +5822,50 @@ function comment_services_postprocess(options, result) {
 function theme_comment(variables) {
   try {
     var comment = variables.comment;
-    var html = '';
+    // Set the container id and append default attributes.
+    variables.attributes.id = comment_container_id(comment.cid);
+    variables.attributes['class'] += 'comment ';
+    variables.attributes['data-role'] = 'collapsible';
+    variables.attributes['data-collapsed'] = 'false';
+    var html = '<div ' + drupalgap_attributes(variables.attributes) + '>';
     var comment_content = '';
+    // Any user picture?
+    // @TODO - the user picture doesn't use an image style here, it uses the
+    // original picture uploaded by the user, which can be varying sizes.
     var picture = '';
     if (comment.picture_uri) {
-      comment_content += theme(
-        'image',
-        { path: drupalgap_image_path(comment.picture_uri) }
+      picture += theme(
+        'image', { path: drupalgap_image_path(comment.picture_uri) }
       );
     }
+    // Comment date.
     var created = new Date(comment.created * 1000);
     created = created.toLocaleDateString() + ' at ' +
       created.toLocaleTimeString();
+    // Append comment extra fields and content. The user info will be rendered
+    // as a list item link.
+    var author = picture +
+        '<h3>' + comment.name + '</h3>' +
+        '<p>' + created + '</p>';
+    author = l(author, 'user/' + comment.uid);
     comment_content +=
-      '<h2>' + comment.name + '</h2>' +
-      '<h3>' + comment.subject + '<h3/>' +
-      '<p>' + comment.content + '</p>' +
-      '<p class="ui-li-aside">' + created + '</p>';
-    // Comments will link to the user's profile, unless they are anonymous.
-    var comment_link_path = 'user/' + comment.uid;
-    if (comment.uid == 0) { comment_link_path = null; }
-    html += l(comment_content, comment_link_path);
+      '<h2>' + comment.subject + '</h2>' +
+      '<ul data-role="listview" data-inset="true">' +
+        '<li>' + author + '</li>' +
+      '</ul>' + comment.content;
+    html += comment_content;
+    // Add an edit link if necessary.
     if (user_access('administer comments')) {
-      html += l('Edit', 'comment/' + comment.cid + '/edit', {
+      html += theme('button_link', {
+          text: 'Edit',
+          path: 'comment/' + comment.cid + '/edit',
           attributes: {
             'data-icon': 'gear'
           }
       });
     }
+    // Close the container and return the html.
+    html += '</div>';
     return html;
   }
   catch (error) { console.log('theme_comment - ' + error); }
@@ -6046,14 +6405,12 @@ function drupalgap_entity_render_content(entity_type, entity) {
       entity_type,
       bundle
     );
-    // @TODO - I think we need to update this entity in local storage so this
-    // content property sticks.
-    // @UPDATE - I don't think this is working...
-    /*_entity_local_storage_save(
+    // Update this entity in local storage so the content property sticks.
+    _entity_local_storage_save(
       entity_type,
       entity[entity_primary_key(entity_type)],
       entity
-    );*/
+    );
   }
   catch (error) {
     console.log('drupalgap_entity_render_content - ' + error);
@@ -6952,7 +7309,7 @@ function drupalgap_field_info_instances_add_to_form(entity_type, bundle,
                              // figure out how to handle the 'add another
                              // item' feature.
           }
-          if (entity && entity[name] && entity[name].length != 0) {
+             if (entity && entity[name] && entity[name].length != 0) {
             for (var delta = 0; delta < cardinality; delta++) {
               // @TODO - is this where we need to use the idea of the
               // value_callback property present in Drupal's FAPI, that way
@@ -6969,6 +7326,11 @@ function drupalgap_field_info_instances_add_to_form(entity_type, bundle,
               form.elements[name][language][delta] = {
                 'value': default_value
               };
+              // Place the field item onto the element.
+              if (entity[name][language][delta]) {
+                form.elements[name][language][delta].item =
+                  entity[name][language][delta];
+              }
             }
           }
         }
@@ -7157,8 +7519,9 @@ function number_field_formatter_view(entity_type, entity, field, instance,
 function number_field_widget_form(form, form_state, field, instance, langcode,
   items, delta, element) {
   try {
-    switch (element.type) {
-      case 'number_integer':
+      switch (element.type) {
+       case 'number_integer':
+       case 'number_float':
         // Change the form element into a number, and then set its min/max
         // attributes along with the step.
         items[delta].type = 'number';
@@ -7226,12 +7589,12 @@ function options_field_widget_form(form, form_state, field, instance, langcode,
                   else { on = value; }
               });
             }
-            items[delta].options.attributes.off = off;
-            items[delta].options.attributes.on = on;
+            items[delta].options.attributes['off'] = off;
+            items[delta].options.attributes['on'] = on;
             // If the value equals the on value, then check the box.
-            if (items[delta].value == on) {
-              items[delta].options.attributes.checked = 'checked';
-            }
+            if (
+              typeof items[delta] !== 'undefined' && items[delta].value == on
+            ) { items[delta].options.attributes['checked'] = 'checked'; }
             break;
           default:
             console.log(
@@ -7245,33 +7608,59 @@ function options_field_widget_form(form, form_state, field, instance, langcode,
       case 'list_text':
       case 'list_float':
       case 'list_integer':
-        if (instance.widget.type == 'options_select') {
-          items[delta].type = 'select';
-        }
-        // If the select list is required, add a 'Select' option and set it as
-        // the default.  If it is optional, place a "none" option for the user
-        // to choose from.
-        if (items[delta].required) {
-          items[delta].options[-1] = 'Select';
-          items[delta].value = -1;
-        }
-        else {
-          items[delta].options[''] = '- None -';
-          items[delta].value = '';
-        }
-        // If there are any allowed values, place them on the options list. Then
-        // check for a default value, and set it if necessary.
-        if (field.settings.allowed_values) {
-          $.each(field.settings.allowed_values, function(key, value) {
-              // Don't place values that are objects onto the options (i.e.
-              // commerce taxonomy term reference fields).
-              if (typeof value === 'object') { return; }
-              // Set the key and value for the option.
-              items[delta].options[key] = value;
-          });
-          if (instance.default_value &&
-            typeof instance.default_value[delta].value !== 'undefined') {
-              items[delta].value = instance.default_value[delta].value;
+        if (instance) {
+          switch (instance.widget.type) {
+            case 'options_select':
+              items[delta].type = 'select';
+              // If the select list is required, add a 'Select' option and set
+              // it as the default.  If it is optional, place a "none" option
+              // for the user to choose from.
+              var text = '- None -';
+              if (items[delta].required) { text = 'Select'; }
+              items[delta].options[''] = text;
+              if (empty(items[delta].value)) { items[delta].value = ''; }
+              // If more than one value is allowed, turn it into a multiple
+              // select list.
+              if (field.cardinality != 1) {
+                items[delta].options.attributes['data-native-menu'] = 'false';
+                items[delta].options.attributes['multiple'] = 'multiple';
+              }
+              break;
+            case 'options_buttons':
+              // If there is one value allowed, we turn this into radio
+              // button(s), otherwise they will become checkboxes.
+              var type = 'checkboxes';
+              if (field.cardinality == 1) { type = 'radios'; }
+              items[delta].type = type;
+              break;
+            default:
+              console.log(
+                'WARNING: options_field_widget_form - unsupported widget (' +
+                instance.widget.type + ')'
+              );
+              return false;
+              break;
+          }
+          // If there are any allowed values, place them on the options
+          // list. Then check for a default value, and set it if necessary.
+          if (field && field.settings.allowed_values) {
+            $.each(field.settings.allowed_values, function(key, value) {
+                // Don't place values that are objects onto the options
+                // (i.e. commerce taxonomy term reference fields).
+                if (typeof value === 'object') { return; }
+                // If the value already exists in the options, then someone
+                // else has populated the list (e.g. commerce), so don't do
+                // any processing.
+                if (typeof items[delta].options[key] !== 'undefined') {
+                  return false;
+                }
+                // Set the key and value for the option.
+                items[delta].options[key] = value;
+            });
+            if (instance.default_value && instance.default_value[delta] &&
+              typeof instance.default_value[delta].value !== 'undefined') {
+                items[delta].value = instance.default_value[delta].value;
+            }
           }
         }
         break;
@@ -7377,9 +7766,8 @@ function text_field_widget_form(form, form_state, field, instance, langcode,
     // Determine the widget type, then set the delta item's type property.
     var type = null;
     switch (element.type) {
-      case 'text':
-        type = 'textfield';
-        break;
+      case 'search': type = 'search'; break;
+      case 'text': type = 'textfield'; break;
       case 'textarea':
       case 'text_long':
       case 'text_with_summary':
@@ -7449,12 +7837,40 @@ function image_field_widget_form(form, form_state, field, instance, langcode,
     // Change the item type to a hidden input to hold the file id.
     items[delta].type = 'hidden';
 
+    // If we already have an image for this item, show it.
+    if (typeof items[delta].item !== 'undefined' && items[delta].item.fid) {
+      // Set the hidden input's value equal to the file id.
+      items[delta].value = items[delta].item.fid;
+      // Show the image on the form, the file name as a link to the actual file,
+      // the file size, and a remove button.
+      var path = drupalgap_image_path(items[delta].item.uri);
+      // @TODO - show the filesize.
+      // @TODO - show the remove button.
+      var html = theme('image', { path: path }) +
+        '<div class="filename">' +
+          l(items[delta].item.filename, path, { InAppBrowser: true }) +
+        '</div>';
+        /*theme('button_link', {
+            text: 'Remove',
+            path: null,
+            attributes: {
+              onclick: "_image_field_widget_form_remove_image()",
+              'data-icon': 'delete',
+              'data-iconpos': 'right'
+            }
+        });*/
+        //'<div class="filesize">(' + items[delta].item.filesize + ')</div>';
+      // Add html to the item's children.
+      items[delta].children.push({markup: html});
+      return; // No further processing required.
+    }
+
     // Set the default button text, and if a value was provided,
     // overwrite the button text.
     var button_text = 'Take Photo';
-    if (items[delta].value) { button_text = item.value; }
+    if (items[delta].value) { button_text = items[delta].value; }
     var browse_button_text = 'Browse';
-    if (items[delta].value2) { browse_button_text = item.value2; }
+    if (items[delta].value2) { browse_button_text = items[delta].value2; }
 
     // Place variables into document for PhoneGap image processing.
     var item_id_base = items[delta].id.replace(/-/g, '_');
@@ -7554,6 +7970,19 @@ function image_field_widget_form(form, form_state, field, instance, langcode,
 }
 
 /**
+ * On an entity edit form, this removes an image file from the server, then from
+ * the form elements and user interface.
+ */
+function _image_field_widget_form_remove_image() {
+  try {
+    alert('_image_field_widget_form_remove_image');
+  }
+  catch (error) {
+    console.log('_image_field_widget_form_remove_image - ' + error);
+  }
+}
+
+/**
  * Given an entity type and optional bundle name, this will return an array
  * containing any image field names present, false otherwise.
  * @param {String} entity_type
@@ -7564,6 +7993,7 @@ function image_fields_present_on_entity_type(entity_type, bundle) {
   try {
     var results = [];
     var fields = drupalgap_field_info_instances(entity_type, bundle);
+    if (!fields) { return false; }
     $.each(fields, function(name, field) {
         if (field.widget &&
           field.widget.type &&
@@ -7724,6 +8154,28 @@ function _image_field_form_process(form, form_state, options) {
 }
 
 /**
+ * Implements hook_assemble_form_state_into_field().
+ * @param {Object} entity_type
+ * @param {String} bundle
+ * @param {String} form_state_value
+ * @param {Object} field
+ * @param {Object} instance
+ * @param {String} langcode
+ * @param {Number} delta
+ * @param {Object} field_key
+ * @return {*}
+ */
+function image_assemble_form_state_into_field(entity_type, bundle,
+  form_state_value, field, instance, langcode, delta, field_key) {
+  try {
+    field_key.value = 'fid';
+    return form_state_value;
+  }
+  catch (error) {
+    console.log('image_assemble_form_state_into_field - ' + error);
+  }
+}
+/**
  * Implements hook_block_view().
  * @param {String} delta
  * @param {Object} region
@@ -7737,19 +8189,32 @@ function menu_block_view(delta, region) {
   // menu since our theme_item_list implementation returns empty lists
   // for jQM pageshow async list item data retrieval and display.
   try {
+    // Load the menu.
+    var menu = drupalgap.menus[delta];
     // Since menu link paths may have an 'access_callback' handler that needs
     // to make an async call to the server (e.g. local tasks), we'll utilize a
     // pageshow handler to render the menu, so for now just render an empty
     // placeholder and pageshow handler.
-    var page_id = drupalgap_get_page_id();
-    var container_id = menu_container_id(delta, page_id);
+    var container_id = menu_container_id(delta);
     var data_role = null;
     if (region.attributes && region.attributes['data-role']) {
       data_role = region.attributes['data-role'];
     }
-    return '<div id="' + container_id + '"></div>' +
+    // If the menu is wrapped, check to see if any wrap_options attributes were
+    // attached. If any were provided use them to build the div container
+    // attributes. We will always overwrite the container id though, since it is
+    // generated by the system (and used to dynamically inject the menu html).
+    var container_attributes = {};
+    if (
+      typeof menu.options !== 'undefined' &&
+      typeof menu.options.wrap !== 'undefined' &&
+      menu.options.wrap && menu.options.wrap_options &&
+      menu.options.wrap_options.attributes
+    ) { container_attributes = menu.options.wrap_options.attributes; }
+    container_attributes.id = container_id;
+    return '<div ' + drupalgap_attributes(container_attributes) + '></div>' +
       drupalgap_jqm_page_event_script_code({
-          page_id: page_id,
+          page_id: drupalgap_get_page_id(),
           jqm_page_event: 'pageshow',
           jqm_page_event_callback: 'menu_block_view_pageshow',
           jqm_page_event_args: JSON.stringify({
@@ -7794,44 +8259,57 @@ function menu_block_view_pageshow(options) {
 
         // Define a success callback that will be called later on...
         var _success = function(result) {
-          var menu_items = [];
-          var link_path = '';
-          $.each(
-            drupalgap.menu_links[router_path].children,
-            function(index, child) {
-              if (drupalgap.menu_links[child] && (
-                drupalgap.menu_links[child].type == 'MENU_DEFAULT_LOCAL_TASK' ||
-                drupalgap.menu_links[child].type == 'MENU_LOCAL_TASK'
-              )) {
-                if (drupalgap_menu_access(child, null, result)) {
-                  menu_items.push(drupalgap.menu_links[child]);
+          try {
+            var menu_items = [];
+            var link_path = '';
+            $.each(
+              drupalgap.menu_links[router_path].children,
+              function(index, child) {
+                if (drupalgap.menu_links[child] && (
+                  drupalgap.menu_links[child].type ==
+                    'MENU_DEFAULT_LOCAL_TASK' ||
+                  drupalgap.menu_links[child].type ==
+                    'MENU_LOCAL_TASK'
+                )) {
+                  if (drupalgap_menu_access(child, null, result)) {
+                    menu_items.push(drupalgap.menu_links[child]);
+                  }
                 }
               }
+            );
+            // If there was only one local task menu item, and it is the default
+            // local task, don't render the menu, otherwise render the menu as
+            // an item list as long as there are items to render.
+            if (
+              menu_items.length == 1 &&
+              menu_items[0].type == 'MENU_DEFAULT_LOCAL_TASK'
+            ) { html = ''; }
+            else {
+              var items = [];
+              $.each(menu_items, function(index, item) {
+                  items.push(
+                    l(item.title, drupalgap_place_args_in_path(item.path))
+                  );
+              });
+              if (items.length > 0) {
+                html = theme('item_list', {'items': items});
+              }
             }
-          );
-          // If there was only one local task menu item, and it is the default
-          // local task, don't render the menu, otherwise render the menu as an
-          // item list as long as there are items to render.
-          if (
-            menu_items.length == 1 &&
-            menu_items[0].type == 'MENU_DEFAULT_LOCAL_TASK'
-          ) { html = ''; }
-          else {
-            var items = [];
-            $.each(menu_items, function(index, item) {
-                items.push(
-                  l(item.title, drupalgap_place_args_in_path(item.path))
-                );
-            });
-            if (items.length > 0) {
-              html = theme('item_list', {'items': items});
+            // Inject the html.
+            $('#' + options.container_id).html(html).trigger('create');
+            // If the block's region is a jQM navbar, refresh the navbar.
+            if (options['data-role'] && options['data-role'] == 'navbar') {
+              $('#' + options.container_id).navbar();
             }
+            // Optionally remove the placeholder wrapper.
+            var menu = drupalgap.menus[options.menu_name];
+            if (
+              typeof menu.options !== 'undefined' &&
+              (typeof menu.options.wrap === 'undefined' || !menu.options.wrap)
+            ) { $('#' + options.container_id).children().unwrap(); }
           }
-          // Inject the html.
-          $('#' + options.container_id).html(html).trigger('create');
-          // If the block's region is a jQM navbar, refresh the navbar.
-          if (options['data-role'] && options['data-role'] == 'navbar') {
-            $('#' + options.container_id).navbar();
+          catch (error) {
+            console.log('menu_block_view_pageshow - success - ' + error);
           }
         };
 
@@ -7915,9 +8393,11 @@ function menu_block_view_pageshow(options) {
 
       // If the block's corresponding menu exists, and it has links, iterate
       // over each link, add it to an items array, then theme an item list.
+      var menu = false;
       if (drupalgap.menus[delta] && drupalgap.menus[delta].links) {
+        menu = drupalgap.menus[delta];
         var items = [];
-        $.each(drupalgap.menus[delta].links, function(index, menu_link) {
+        $.each(menu.links, function(index, menu_link) {
             // Make a deep copy of the menu link so we don't modify it.
             var link = jQuery.extend(true, {}, menu_link);
             // If there are no link options, set up defaults.
@@ -7929,21 +8409,28 @@ function menu_block_view_pageshow(options) {
                 link.options.attributes['class'] = '';
               }
               link.options.attributes['class'] +=
-                ' ui-btn-active ui-state-persist ';
+                ' ui-btn ui-btn-active ui-state-persist ';
             }
             items.push(l(link.title, link.path, link.options));
         });
         if (items.length > 0) {
           // Pass along any menu attributes.
           var attributes = null;
-          if (
-            drupalgap.menus[delta].options &&
-            drupalgap.menus[delta].options.attributes
-          ) { attributes = drupalgap.menus[delta].options.attributes; }
+          if (menu.options && menu.options.attributes) {
+            attributes = drupalgap.menus[delta].options.attributes;
+          }
           html = theme('item_list', {'items': items, 'attributes': attributes});
         }
       }
+      // Inject the html.
       $('#' + options.container_id).html(html).trigger('create');
+      // Remove the placeholder wrapper, unless we were instructed not to.
+      var wrap = false;
+      if (
+        menu && typeof menu.options !== 'undefined' &&
+        typeof menu.options.wrap !== 'undefined' && menu.options.wrap
+      ) { wrap = true; }
+      if (!wrap) { $('#' + options.container_id).children().unwrap(); }
     }
   }
   catch (error) { console.log('menu_block_view_pageshow - ' + error); }
@@ -7964,6 +8451,68 @@ function menu_install() {
 }
 
 /**
+ * Returns a JSON object that can be used as default options for a menu object.
+ * @return {Object}
+ */
+function menu_popup_get_default_options() {
+  try {
+    return {
+      attributes: {
+        'data-role': 'listview'
+      },
+      wrap: true,
+      wrap_options: {
+        attributes: {
+          'data-role': 'popup'
+        }
+      }
+    };
+  }
+  catch (error) { console.log('menu_popup_get_default_options - ' + error); }
+}
+
+/**
+ * Given a menu region link, this will return its data JSON object, or null if
+ * no data exists.
+ * @param {Object} region_link
+ * @return {*)
+ */
+function menu_region_link_get_data(region_link) {
+  try {
+    // Extract the data associated with this link. If it has a 'region'
+    // property then it is coming from a hook_menu, if it doesn't then it
+    // is coming from settings.js.
+    var data = null;
+    if (typeof region_link.region === 'undefined') {
+      data = region_link; // link defined in settings.js
+      // @TODO - we need to warn people that they can't make a custom menu
+      // with a machine name of 'regions' now that this machine name is a
+      // "system" name for rendering links in regions.
+    }
+    // link defined via hook_menu()
+    else { data = region_link.region; }
+    return data;
+  }
+  catch (error) { console.log('menu_region_link_get_data - ' + error); }
+}
+
+/**
+ * Given a menu region link's class name, this will return what side of the ui
+ * it is on, returns left by default, unless it specifically contains the
+ * ui-btn-right class.
+ * @param {String} class_name
+ * @return {String)
+ */
+function menu_region_link_get_side(class_name) {
+  try {
+    var side = 'left';
+    if (class_name.indexOf('ui-btn-right') != -1) { side = 'right'; }
+    return side;
+  }
+  catch (error) { console.log('menu_region_link_get_side - ' + error); }
+}
+
+/**
  * Given a menu, this adds it to drupalgap.menus. See menu_list_system_menus
  * for examples of a menu JSON object.
  * @param {Object} menu
@@ -7976,14 +8525,33 @@ function menu_save(menu) {
 }
 
 /**
- * Given a menu name and page id, this will return its container id for that
- * page.
+ * Given a menu name, this will return it from drupalgap.menus, or return null
+ * if it doesn't exist.
+ * @param {String} name
+ * @return {*}
+ */
+function menu_load(name) {
+  try {
+    if (typeof drupalgap.menus[name] !== 'undefined') {
+      return drupalgap.menus[name];
+    }
+    return null;
+  }
+  catch (error) { console.log('menu_load - ' + error); }
+}
+
+/**
+ * Given a menu name, this will return its container id for that page. You may
+ * optionally pass in a page id as the second argument, otherwise it will use
+ * the current page id.
  * @param {String} menu_name
- * @param {String} page_id
  * @return {String}
  */
-function menu_container_id(menu_name, page_id) {
+function menu_container_id(menu_name) {
   try {
+    var page_id = null;
+    if (arguments[1]) { page_id = arguments[1]; }
+    else { page_id = drupalgap_get_page_id(); }
     return page_id + '_menu_' + menu_name;
   }
   catch (error) { console.log('menu_container_id - ' + error); }
@@ -8590,14 +9158,6 @@ function node_page_view_pageshow(nid) {
             'title': {'markup': node.title},
             'content': {'markup': node.content}
           };
-          // Build an empty list for the comments.
-          var comments = {
-            title: 'Comments',
-            items: [],
-            attributes: {
-              id: comment_list_id(node.nid)
-            }
-          };
           // If the comments are closed (1) or open (2), show the comments.
           if (node.comment != 0) {
             if (node.comment == 1 || node.comment == 2) {
@@ -8620,16 +9180,15 @@ function node_page_view_pageshow(nid) {
                 comment_index(query, {
                     success: function(results) {
                       try {
+                        // Render the comments.
+                        var comments = '';
                         $.each(results, function(index, comment) {
-                            comments.items.push(theme('comment', {
-                                comment: comment
-                            }));
+                            comments += theme('comment', { comment: comment });
                         });
-                        // Render the comment list.
-                        build.content.markup += theme(
-                          'jqm_item_list',
-                          comments
-                        );
+                        build.content.markup += theme('comments', {
+                            node: node,
+                            comments: comments
+                        });
                         // If the comments are open, show the comment form.
                         if (node.comment == 2) {
                           build.content.markup += comment_form;
@@ -8648,10 +9207,11 @@ function node_page_view_pageshow(nid) {
                 });
               }
               else {
-                // There weren't any comments, show the comment form if comments
-                // are open, then inject the page.
+                // There weren't any comments, append an empty comments wrapper
+                // and show the comment form if comments are open, then inject
+                // the page.
                 if (node.comment == 2) {
-                  build.content.markup += theme('jqm_item_list', comments);
+                  build.content.markup += theme('comments', { node: node });
                   build.content.markup += comment_form;
                 }
                 _drupalgap_entity_page_container_inject(
@@ -8661,8 +9221,9 @@ function node_page_view_pageshow(nid) {
             }
           }
           else {
-            // Comments are hidden (0), so let's render an empty list, then
-            // inject the content into the page.
+            // Comments are hidden (0), append an empty comments wrapper to the
+            // content and inject the content into the page.
+            build.content.markup += theme('comments', { node: node });
             _drupalgap_entity_page_container_inject(
               'node', node.nid, 'view', build
             );
@@ -8708,6 +9269,41 @@ function node_theme() {
 }
 
 /**
+ * Implements hook_block_info().
+ * @return {Object}
+ */
+function search_block_info() {
+  try {
+    var blocks = {};
+    blocks['search'] = {
+      delta: 'search',
+      module: 'search'
+    };
+    return blocks;
+  }
+  catch (error) { console.log('search_block_info - ' + error); }
+}
+
+/**
+ * Implements hook_block_view().
+ * @param {String} delta
+ * @param {String} region
+ * @return {String}
+ */
+function search_block_view(delta, region) {
+  try {
+    var content = '';
+    if (delta == 'search') {
+      if (user_access('search content')) {
+        content = drupalgap_get_form('search_block_form');
+      }
+    }
+    return content;
+  }
+  catch (error) { console.log('search_block_view - ' + error); }
+}
+
+/**
  * Implements hook_menu().
  * @return {Object}
  */
@@ -8726,14 +9322,56 @@ function search_menu() {
   catch (error) { console.log('search_menu - ' + error); }
 }
 
+
+/**
+ * The search block form.
+ * @param {Object} form
+ * @param {Object} form_state
+ * @return {Object}
+ */
+function search_block_form(form, form_state) {
+  try {
+    form.elements['type'] = {
+      type: 'hidden',
+      default_value: 'node'
+    };
+    form.elements['keys'] = {
+      type: 'search',
+      title: '',
+      title_placeholder: true,
+      required: true,
+      default_value: ''
+    };
+    // Since there is no submit button on the form, we'll catch the onsubmit
+    // action and the trigger the form submission.
+    form.options.attributes['onsubmit'] =
+      "_drupalgap_form_submit('" + form.id + "'); return false;";
+    return form;
+  }
+  catch (error) { console.log('search_block_form - ' + error); }
+}
+
+/**
+ * The search block form submit handler.
+ * @param {Object} form
+ * @param {Object} form_state
+ */
+function search_block_form_submit(form, form_state) {
+  try {
+    var type = form_state.values['type'];
+    var keys = form_state.values['keys'];
+    drupalgap_goto('search/' + type + '/' + keys);
+  }
+  catch (error) { console.log('search_block_form_submit - ' + error); }
+}
+
 /**
  * The search form.
  * @param {Object} form
  * @param {Object} form_state
- * @param {String} form_id
  * @return {Object}
  */
-function search_form(form, form_state, form_id) {
+function search_form(form, form_state) {
   try {
     var type = arg(1);
     var keys = arg(2);
@@ -8757,6 +9395,7 @@ function search_form(form, form_state, form_id) {
       }
     };
     form.suffix += theme('jqm_item_list', {
+        title: 'Search results',
         items: [],
         options: {
           attributes: {
@@ -8776,8 +9415,8 @@ function search_form(form, form_state, form_id) {
  */
 function search_form_submit(form, form_state) {
   try {
-    var type = form_state.values.type;
-    var keys = form_state.values.keys;
+    var type = form_state.values['type'];
+    var keys = form_state.values['keys'];
     switch (type) {
       case 'node':
         search_node(keys, {
@@ -9414,18 +10053,20 @@ function user_login_form(form, form_state) {
     form.entity_type = 'user';
     form.bundle = null;
     form.elements.name = {
-      'type': 'textfield',
-      'title': 'Username',
-      'required': true
+      type: 'textfield',
+      title: 'Username',
+      title_placeholder: true,
+      required: true
     };
     form.elements.pass = {
-      'type': 'password',
-      'title': 'Password',
-      'required': true
+      type: 'password',
+      title: 'Password',
+      title_placeholder: true,
+      required: true
     };
     form.elements.submit = {
-      'type': 'submit',
-      'value': 'Login'
+      type: 'submit',
+      value: 'Login'
     };
     return form;
   }
@@ -9579,16 +10220,18 @@ function user_register_form(form, form_state) {
     form.entity_type = 'user';
     form.bundle = null;
     form.elements.name = {
-      'type': 'textfield',
-      'title': 'Username',
-      'required': true,
-      'description': 'Spaces are allowed; punctuation is not allowed except ' +
+      type: 'textfield',
+      title: 'Username',
+      title_placeholder: true,
+      required: true,
+      description: 'Spaces are allowed; punctuation is not allowed except ' +
         'for periods, hyphens, apostrophes, and underscores.'
     };
     form.elements.mail = {
-      'type': 'email',
-      'title': 'E-mail address',
-      'required': true
+      type: 'email',
+      title: 'E-mail address',
+      title_placeholder: true,
+      required: true
     };
     // If e-mail verification is not requred, provide password fields and
     // the confirm e-mail address field.
@@ -9596,16 +10239,19 @@ function user_register_form(form, form_state) {
       form.elements.conf_mail = {
         type: 'email',
         title: 'Confirm e-mail address',
+        title_placeholder: true,
         required: true
       };
       form.elements.pass = {
         type: 'password',
         title: 'Password',
+        title_placeholder: true,
         required: true
       };
       form.elements.pass2 = {
         type: 'password',
         title: 'Confirm password',
+        title_placeholder: true,
         required: true
       };
     }
@@ -10757,15 +11403,16 @@ function theme_view(variables) {
     }
     // Since we'll by making an asynchronous call to load the view, we'll just
     // return an empty div container, with a script snippet to load the view.
-    var html = '<div id="' + variables.attributes.id + '" class="view"></div>';
+    variables.attributes['class'] += 'view ';
+    var html =
+      '<div ' + drupalgap_attributes(variables.attributes) + ' ></div>';
     var options = {
       page_id: drupalgap_get_page_id(),
       jqm_page_event: 'pageshow',
       jqm_page_event_callback: '_theme_view',
       jqm_page_event_args: JSON.stringify(variables)
     };
-    html += drupalgap_jqm_page_event_script_code(options);
-    return html;
+    return html += drupalgap_jqm_page_event_script_code(options);
   }
   catch (error) { console.log('theme_view - ' + error); }
 }
@@ -10846,13 +11493,7 @@ function views_embed_view(path, options) {
  */
 function theme_views_view(variables) {
   try {
-    // If an id hasn't been provided, generate a random one. We need an id for
-    // the div container.
-    var id = null;
-    if (variables.attributes.id) { id = variables.attributes.id; }
-    else { id = 'views-view--' + user_password(); }
-    // Open the container.
-    var html = '<div id="' + id + '">';
+    var html = '';
     // Extract the results.
     var results = _views_embed_view_results;
     if (!results) { return html; }
@@ -10903,7 +11544,18 @@ function theme_views_view(variables) {
         close_row = '</li>';
         break;
       case 'table':
-        open = '<table>';
+      case 'jqm_table':
+        var table_attributes = '';
+        if (variables.format == 'jqm_table') {
+          table_attributes = drupalgap_attributes({
+            'data-role': 'table',
+            'data-mode': 'reflow'
+          });
+          console.log(
+            'WARNING: theme_views_view() - jqm_table not supported, yet'
+          );
+        }
+        open = '<table ' + table_attributes + '>';
         close = '</table>';
         open_row = '<tr>';
         close_row = '</tr>';
@@ -10956,13 +11608,13 @@ function theme_views_view(variables) {
     }
     // Since the views content is injected dynamically after the page is loaded,
     // we need to have jQM refresh the page to add its styling.
-    var selector = '#' + drupalgap_get_page_id() + ' #' + id;
+    var selector =
+      '#' + drupalgap_get_page_id() +
+      ' #' + variables.attributes.id;
     $(selector).hide();
     setTimeout(function() {
         $(selector).trigger('create').show('fast');
     }, 100);
-    // Close the container.
-    html += '</div>';
     return html;
   }
   catch (error) { console.log('theme_views_view - ' + error); }
