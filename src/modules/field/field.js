@@ -129,7 +129,7 @@ function drupalgap_field_info_instances_add_to_form(entity_type, bundle,
           if (entity && entity[name] && entity[name].length != 0) {
             for (var delta = 0; delta < cardinality; delta++) {
               // @TODO - is this where we need to use the idea of the
-              // value_callback property present in Drupal's FAPI, that way
+              // value_callback property present in Drupal's FAPI? That way
               // each element knows how to map the entity data to its element
               // value property.
               if (
@@ -141,8 +141,13 @@ function drupalgap_field_info_instances_add_to_form(entity_type, bundle,
               // @todo - It appears not all fields have a language code to use
               // here, for example taxonomy term reference fields don't!
               form.elements[name][language][delta] = {
-                'value': default_value
+                value: default_value
               };
+              // Place the field item onto the element.
+              if (entity[name][language][delta]) {
+                form.elements[name][language][delta].item =
+                  entity[name][language][delta];
+              }
             }
           }
         }
@@ -333,6 +338,7 @@ function number_field_widget_form(form, form_state, field, instance, langcode,
   try {
     switch (element.type) {
       case 'number_integer':
+      case 'number_float':
         // Change the form element into a number, and then set its min/max
         // attributes along with the step.
         items[delta].type = 'number';
@@ -351,6 +357,7 @@ function number_field_widget_form(form, form_state, field, instance, langcode,
           ')'
         );
         break;
+        
     }
   }
   catch (error) { console.log('number_field_widget_form - ' + error); }
@@ -400,12 +407,12 @@ function options_field_widget_form(form, form_state, field, instance, langcode,
                   else { on = value; }
               });
             }
-            items[delta].options.attributes.off = off;
-            items[delta].options.attributes.on = on;
+            items[delta].options.attributes['off'] = off;
+            items[delta].options.attributes['on'] = on;
             // If the value equals the on value, then check the box.
-            if (items[delta].value == on) {
-              items[delta].options.attributes.checked = 'checked';
-            }
+            if (
+              typeof items[delta] !== 'undefined' && items[delta].value == on
+            ) { items[delta].options.attributes['checked'] = 'checked'; }
             break;
           default:
             console.log(
@@ -419,33 +426,59 @@ function options_field_widget_form(form, form_state, field, instance, langcode,
       case 'list_text':
       case 'list_float':
       case 'list_integer':
-        if (instance.widget.type == 'options_select') {
-          items[delta].type = 'select';
-        }
-        // If the select list is required, add a 'Select' option and set it as
-        // the default.  If it is optional, place a "none" option for the user
-        // to choose from.
-        if (items[delta].required) {
-          items[delta].options[-1] = 'Select';
-          items[delta].value = -1;
-        }
-        else {
-          items[delta].options[''] = '- None -';
-          items[delta].value = '';
-        }
-        // If there are any allowed values, place them on the options list. Then
-        // check for a default value, and set it if necessary.
-        if (field.settings.allowed_values) {
-          $.each(field.settings.allowed_values, function(key, value) {
-              // Don't place values that are objects onto the options (i.e.
-              // commerce taxonomy term reference fields).
-              if (typeof value === 'object') { return; }
-              // Set the key and value for the option.
-              items[delta].options[key] = value;
-          });
-          if (instance.default_value &&
-            typeof instance.default_value[delta].value !== 'undefined') {
-              items[delta].value = instance.default_value[delta].value;
+        if (instance) {
+          switch (instance.widget.type) {
+            case 'options_select':
+              items[delta].type = 'select';
+              // If the select list is required, add a 'Select' option and set
+              // it as the default.  If it is optional, place a "none" option
+              // for the user to choose from.
+              var text = '- None -';
+              if (items[delta].required) { text = 'Select'; }
+              items[delta].options[''] = text;
+              if (empty(items[delta].value)) { items[delta].value = ''; }
+              // If more than one value is allowed, turn it into a multiple
+              // select list.
+              if (field.cardinality != 1) {
+                items[delta].options.attributes['data-native-menu'] = 'false';
+                items[delta].options.attributes['multiple'] = 'multiple';
+              }
+              break;
+            case 'options_buttons':
+              // If there is one value allowed, we turn this into radio
+              // button(s), otherwise they will become checkboxes.
+              var type = 'checkboxes';
+              if (field.cardinality == 1) { type = 'radios'; }
+              items[delta].type = type;
+              break;
+            default:
+              console.log(
+                'WARNING: options_field_widget_form - unsupported widget (' +
+                instance.widget.type + ')'
+              );
+              return false;
+              break;
+          }
+          // If there are any allowed values, place them on the options
+          // list. Then check for a default value, and set it if necessary.
+          if (field && field.settings.allowed_values) {
+            $.each(field.settings.allowed_values, function(key, value) {
+                // Don't place values that are objects onto the options
+                // (i.e. commerce taxonomy term reference fields).
+                if (typeof value === 'object') { return; }
+                // If the value already exists in the options, then someone
+                // else has populated the list (e.g. commerce), so don't do
+                // any processing.
+                if (typeof items[delta].options[key] !== 'undefined') {
+                  return false;
+                }
+                // Set the key and value for the option.
+                items[delta].options[key] = value;
+            });
+            if (instance.default_value && instance.default_value[delta] &&
+              typeof instance.default_value[delta].value !== 'undefined') {
+                items[delta].value = instance.default_value[delta].value;
+            }
           }
         }
         break;
@@ -551,9 +584,8 @@ function text_field_widget_form(form, form_state, field, instance, langcode,
     // Determine the widget type, then set the delta item's type property.
     var type = null;
     switch (element.type) {
-      case 'text':
-        type = 'textfield';
-        break;
+      case 'search': type = 'search'; break;
+      case 'text': type = 'textfield'; break;
       case 'textarea':
       case 'text_long':
       case 'text_with_summary':
